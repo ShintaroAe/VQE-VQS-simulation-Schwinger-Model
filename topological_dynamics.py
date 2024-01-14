@@ -423,7 +423,7 @@ class LoschmidtEcho:
         self.cost_val_list.append(cost_val)
         return cost_val
 
-    def initialize_VQE(self, method = "COBYLA", maxiter=500, tol=0.01, shots=10000, statevector=False):
+    def initialize_VQE(self, method = "COBYLA", maxiter=500, tol=0.01, shots=10000, statevector=False, init_params = False):
         '''
         Run the VQE and find the best parameter
         input:
@@ -453,13 +453,15 @@ class LoschmidtEcho:
             cost_val_list: transition of the optimization
         '''
         if method != "COBYLA": tol = None
-        params_init_VQE = 2*pi*np.random.rand(len(self.params))
+        if not isinstance(init_params, np.ndarray): 
+            params_init_VQE = 2*pi*np.random.rand(len(self.params))
+        else: params_init_VQE = init_params
         self.cost_val_list = []
         res_VQE = minimize(self.get_cost_val_VQE, params_init_VQE, args=(shots, statevector), method=method, options={'maxiter':maxiter, 'tol':tol})
         self.init_parameters = res_VQE.x
         # return res_VQE.fun, res_VQE.x, np.array(self.cost_val_list)
     
-    def quench(self, del_theta, duration, steps, shots = 10000, statevector = False):
+    def quench(self, del_theta, duration, steps, shots = 10000, statevector = False, threshold = False):
         '''
         function that calculate the evolution of parameters by euler method
         input:
@@ -471,6 +473,8 @@ class LoschmidtEcho:
                 how much steps is taken
             shots: int
                 shots for each step
+            threshold: float or int
+                Threshold of condition number for the stabilization of VQS. Please refer to the appendix of my paper.
 
         output: np.array()
             shape: (steps+1, len(self.params))
@@ -485,23 +489,52 @@ class LoschmidtEcho:
         result = np.zeros((steps+1, n))
         result[0] = init_params
         del_t = duration/steps
+        recalculation_tot_number = 0
+
         for step in range(steps):
             ## getting result[step+1] from result[step]
             M_ij = np.zeros((n, n))
             V_i = np.zeros(n)
+
+            recalculation = True
+            ind = 0
+            cond_Mij = 0
+            while recalculation:
+                for i in range(n):
+                    for j in range(n):
+                        M_ij[i][j] = self.AR_ij(result[step], i, j, shots, statevector)+self.N_ij(result[step], i, j, shots, statevector)
+                    print(f"{i}/{n}" if ind == 0 else f"{i}_/n", end=" ")
+                cond_Mij = np.linalg.cond(M_ij)
+                if isinstance(threshold, bool):
+                    recalculation = False
+                else:
+                    if cond_Mij<threshold:
+                        recalculation = False
+                    else:
+                        # print(f"{cond_Mij:.2e}", end = " ")
+                        ind += 1
+                        if ind == 100:
+                            raise SyntaxError("condition number cannot exceed exceed the threshold")
+
             for i in range(n):
-                for j in range(n):
-                    M_ij[i][j] = self.AR_ij(result[step], i, j, shots, statevector)+self.N_ij(result[step], i, j, shots, statevector)
                 V_i[i] = self.CI_i(result[step], del_theta, i, shots, statevector) + self.W_i(result[step], del_theta, i, shots, statevector)
-                print(f"{i}/{n}", end=" ")
+
             self.list_det.append(np.linalg.det(M_ij))
-            self.list_cond.append(np.linalg.cond(M_ij))
-            dlambda_dt = np.linalg.inv(M_ij) @ V_i
+            self.list_cond.append(cond_Mij)
+
+            ##condition number##
+            recalculation_tot_number += ind
+
+            dlambda_dt = np.linalg.solve(M_ij, V_i)
             result[step+1] = result[step] + del_t * dlambda_dt
             print("step {} finished".format(step), end=' ' if step%5 != 4 else '\n')
+
+        self.recalculation_tot_number = recalculation_tot_number
+
         self.params_list = result
         self.time_list = np.linspace(0, duration, steps+1)
         # return list_det
+        ##  memo
 
     def AR_ij(self, params, i, j, shots, statevector):
         '''
